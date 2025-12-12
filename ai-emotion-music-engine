@@ -1,0 +1,268 @@
+import cv2
+import threading
+import queue
+from deepface import DeepFace
+import customtkinter as ctk
+from PIL import Image, ImageTk
+from youtubesearchpython import VideosSearch
+import yt_dlp
+import vlc
+import time
+import numpy as np
+
+# --- App Setup ---
+ctk.set_appearance_mode("dark")
+ctk.set_default_color_theme("dark-blue")
+
+app = ctk.CTk()
+app.title("Emotion-Based Music Player 3000")
+app.geometry("1100x800")
+
+# --- Global Variables ---
+emotion_var = ctk.StringVar(value="Detecting Emotion...")
+song_var = ctk.StringVar(value="Initializing Music...")
+last_emotion = None
+player = None
+vlc_instance = vlc.Instance()
+running = True
+
+# Thread-safe frame container
+latest_frame_lock = threading.Lock()
+latest_frame = None
+
+# Queue to send actions from worker thread to main thread (safe GUI updates)
+main_queue = queue.Queue()
+
+# --- UI layout ---
+bg_frame = ctk.CTkFrame(app, fg_color="#0d0f1e", corner_radius=0)
+bg_frame.place(relwidth=1, relheight=1)
+
+main_frame = ctk.CTkFrame(bg_frame, fg_color="#131729", corner_radius=25, border_width=3, border_color="#00ffff")
+main_frame.place(relx=0.5, rely=0.5, anchor="center", width=1000, height=700)
+
+video_frame = ctk.CTkFrame(main_frame, fg_color="#141c2f", border_width=2, border_color="#ff00ff", corner_radius=20)
+video_frame.pack(pady=20)
+
+video_label = ctk.CTkLabel(video_frame, text="")
+video_label.pack()
+
+emotion_label = ctk.CTkLabel(main_frame, textvariable=emotion_var,
+                              font=ctk.CTkFont("Arial", size=32, weight="bold"),
+                              text_color="#00ffff")
+emotion_label.pack(pady=(20, 5))
+
+song_title_label = ctk.CTkLabel(main_frame, textvariable=song_var,
+                                font=ctk.CTkFont("Arial", size=20, weight="bold"),
+                                text_color="#ff00ff")
+song_title_label.pack(pady=(0, 15))
+
+visualizer_frame = ctk.CTkFrame(main_frame, fg_color="#0f0f1f", corner_radius=20, border_color="#8e44ad", border_width=2)
+visualizer_frame.pack(pady=10)
+visualizer_canvas = ctk.CTkCanvas(visualizer_frame, width=700, height=120, bg="#0f0f1f", highlightthickness=0)
+visualizer_canvas.pack(pady=10)
+
+bars = []
+bar_width = 12
+gap = 4
+num_bars = 45
+for i in range(num_bars):
+    x = i * (bar_width + gap)
+    bar = visualizer_canvas.create_rectangle(x, 120, x + bar_width, 120, fill="#00ffff", outline="")
+    bars.append(bar)
+
+# --- Visualizer animation ---
+def animate_visualizer():
+    if not running:
+        return
+    for bar in bars:
+        height = np.random.randint(25, 110)
+        coords = visualizer_canvas.coords(bar)
+        # coords[0] is x1, coords[2] is x2
+        visualizer_canvas.coords(bar, coords[0], 120 - height, coords[2], 120)
+    visualizer_canvas.after(80, animate_visualizer)
+
+# --- Pulse emotion label color ---
+def pulse_emotion():
+    colors = ["#00ffff", "#ff00ff", "#8e44ad", "#00ffd5"]
+    idx = 0
+    def cycle():
+        nonlocal idx
+        emotion_label.configure(text_color=colors[idx % len(colors)])
+        idx += 1
+        if running:
+            emotion_label.after(400, cycle)
+    cycle()
+
+# --- YouTube search & stream helpers ---
+def search_youtube_video(emotion: str):
+    emotion_to_query = {
+        "Happy": "happy upbeat pop songs",
+        "Sad": "emotional hindi songs",
+        "Angry": "aggressive rap music",
+        "Neutral": "lofi chillhop mix",
+        "Surprise": "exciting edm tracks",
+        "Fear": "calming piano music",
+        "Disgust": "motivational workout music"
+    }
+    query = emotion_to_query.get(emotion, "relaxing ambient music")
+    search = VideosSearch(query, limit=1)
+    result = search.result()
+    if not result or not result.get('result'):
+        return None, None
+    url = result['result'][0]['link']
+    title = result['result'][0]['title']
+    return url, title
+
+def stream_youtube_audio(url):
+    global player, vlc_instance
+    if not url:
+        return
+    # stop existing
+    if player:
+        try:
+            player.stop()
+        except Exception:
+            pass
+
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'quiet': True,
+        'noplaylist': True,
+        'skip_download': True,
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+        # yt_dlp gives a direct stream URL in info['url'] (or need to build from formats)
+        # try to fetch best audio url
+        audio_url = None
+        if info.get('url'):
+            audio_url = info['url']
+        else:
+            # fallback: take first audio format
+            formats = info.get('formats') or []
+            for f in reversed(formats):
+                if f.get('acodec') and f.get('url'):
+                    audio_url = f['url']
+                    break
+        if audio_url is None:
+            return
+
+    player = vlc_instance.media_player_new()
+    media = vlc_instance.media_new(audio_url)
+    player.set_media(media)
+    player.play()
+
+# --- Camera & emotion worker thread ---
+ANALYZE_INTERVAL = 2.0  # seconds between emotion analyses
+
+def camera_worker():
+    global latest_frame, running, last_emotion
+    cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)  # on Windows use CAP_DSHOW for fewer warnings; harmless if not present
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
+    last_analyze_time = 0.0
+
+    while running:
+        ret, frame = cap.read()
+        if not ret:
+            time.sleep(0.1)
+            continue
+
+        # store latest frame for GUI to display
+        with latest_frame_lock:
+            latest_frame = frame.copy()
+
+        now = time.time()
+        if now - last_analyze_time >= ANALYZE_INTERVAL:
+            last_analyze_time = now
+            # analyze in this worker thread but avoid heavy size
+            try:
+                small = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)
+                # DeepFace.analyze returns a dict like {'dominant_emotion': 'happy', ...}
+                result = DeepFace.analyze(small, actions=['emotion'], enforce_detection=False)
+                if isinstance(result, list):
+                    # older versions might wrap result in a list
+                    result = result[0]
+                emotion = result.get('dominant_emotion', None)
+                if emotion:
+                    emotion = str(emotion).capitalize()
+                else:
+                    emotion = "Unknown"
+
+                # if changed emotion, queue an action onto main thread to update UI and stream
+                if emotion != last_emotion:
+                    last_emotion = emotion
+                    url, title = search_youtube_video(emotion)
+                    main_queue.put({"type": "emotion_change", "emotion": emotion, "title": title, "url": url})
+            except Exception as e:
+                # queue unknown state if needed
+                main_queue.put({"type": "emotion_error", "error": str(e)})
+                # continue loop
+        # small sleep to avoid tight loop
+        time.sleep(0.02)
+
+    cap.release()
+
+# --- Main-thread updater: consumes main_queue and updates GUI ---
+def process_main_queue():
+    try:
+        while True:
+            item = main_queue.get_nowait()
+            typ = item.get("type")
+            if typ == "emotion_change":
+                emotion = item.get("emotion", "Unknown")
+                title = item.get("title", "Unknown Track")
+                url = item.get("url")
+                emotion_var.set(f"Emotion: {emotion}")
+                song_var.set(f"Now Playing: {title}" if title else "Now Playing: Unknown")
+                # stream in a separate thread to avoid blocking mainloop
+                threading.Thread(target=stream_youtube_audio, args=(url,), daemon=True).start()
+            elif typ == "emotion_error":
+                # log or display a simple message
+                emotion_var.set("Emotion: Unknown")
+            main_queue.task_done()
+    except queue.Empty:
+        pass
+    if running:
+        app.after(100, process_main_queue)
+
+# --- UI frame updater: runs on main thread and shows latest_frame ---
+def update_frame():
+    if not running:
+        return
+    frame = None
+    with latest_frame_lock:
+        if latest_frame is not None:
+            frame = latest_frame.copy()
+
+    if frame is not None:
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        img = Image.fromarray(rgb)
+        # fit into video_label nicely (optional): resize to width ~640
+        img = img.resize((640, 480))
+        imgtk = ImageTk.PhotoImage(image=img)
+        video_label.imgtk = imgtk
+        video_label.configure(image=imgtk)
+    app.after(30, update_frame)
+
+# --- Clean Exit ---
+def on_closing():
+    global running, player
+    running = False
+    try:
+        if player:
+            player.stop()
+    except Exception:
+        pass
+    app.destroy()
+
+app.protocol("WM_DELETE_WINDOW", on_closing)
+
+# --- Start everything ---
+threading.Thread(target=camera_worker, daemon=True).start()
+process_main_queue()
+update_frame()
+pulse_emotion()
+animate_visualizer()
+app.mainloop()
