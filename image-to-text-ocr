@@ -1,0 +1,245 @@
+# pip install pillow pytesseract
+import os
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
+from PIL import Image, ImageTk
+import pytesseract
+
+# ===== Optional: set tesseract path (Windows) =====
+# pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+
+
+class OCRApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("OCR Scanner - Advanced")
+        self.root.geometry("700x550")
+        self.root.resizable(False, False)
+
+        self.image = None
+        self.image_tk = None
+        self.current_image_path = None
+
+        self._build_ui()
+
+    # ------------ UI ------------
+    def _build_ui(self):
+        # Top frame: buttons + options
+        top_frame = tk.Frame(self.root, pady=5)
+        top_frame.pack(fill=tk.X)
+
+        btn_open = tk.Button(
+            top_frame,
+            text="Open Image",
+            command=self.select_image,
+            bg="#4CAF50",
+            fg="white",
+            padx=10,
+            pady=5
+        )
+        btn_open.pack(side=tk.LEFT, padx=5)
+
+        btn_run = tk.Button(
+            top_frame,
+            text="Run OCR",
+            command=self.run_ocr,
+            bg="#2196F3",
+            fg="white",
+            padx=10,
+            pady=5
+        )
+        btn_run.pack(side=tk.LEFT, padx=5)
+
+        btn_clear = tk.Button(
+            top_frame,
+            text="Clear",
+            command=self.clear_text,
+            padx=10,
+            pady=5
+        )
+        btn_clear.pack(side=tk.LEFT, padx=5)
+
+        btn_copy = tk.Button(
+            top_frame,
+            text="Copy Text",
+            command=self.copy_text,
+            padx=10,
+            pady=5
+        )
+        btn_copy.pack(side=tk.LEFT, padx=5)
+
+        btn_save = tk.Button(
+            top_frame,
+            text="Save Text",
+            command=self.save_text,
+            padx=10,
+            pady=5
+        )
+        btn_save.pack(side=tk.LEFT, padx=5)
+
+        # Options frame (language + config)
+        options_frame = tk.Frame(self.root)
+        options_frame.pack(fill=tk.X, padx=5)
+
+        # Language dropdown
+        tk.Label(options_frame, text="Language:").pack(side=tk.LEFT, padx=(0, 3))
+        self.lang_var = tk.StringVar(value="eng")
+        lang_box = ttk.Combobox(
+            options_frame,
+            textvariable=self.lang_var,
+            values=["eng", "hin", "eng+hin"],
+            width=10,
+            state="readonly"
+        )
+        lang_box.pack(side=tk.LEFT, padx=(0, 10))
+
+        # PSM option
+        tk.Label(options_frame, text="PSM:").pack(side=tk.LEFT)
+        self.psm_var = tk.StringVar(value="6")  # Assume a block of text
+        psm_box = ttk.Combobox(
+            options_frame,
+            textvariable=self.psm_var,
+            values=["3", "4", "6", "7", "11", "13"],
+            width=5,
+            state="readonly"
+        )
+        psm_box.pack(side=tk.LEFT, padx=(0, 10))
+
+        # OEM option
+        tk.Label(options_frame, text="OEM:").pack(side=tk.LEFT)
+        self.oem_var = tk.StringVar(value="3")  # Default
+        oem_box = ttk.Combobox(
+            options_frame,
+            textvariable=self.oem_var,
+            values=["0", "1", "2", "3"],
+            width=5,
+            state="readonly"
+        )
+        oem_box.pack(side=tk.LEFT, padx=(0, 10))
+
+        # Middle frame: image + text
+        middle_frame = tk.PanedWindow(self.root, sashrelief=tk.RAISED)
+        middle_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        # Image frame
+        img_frame = tk.LabelFrame(middle_frame, text="Image Preview", width=340, height=380)
+        img_frame.pack_propagate(False)
+
+        self.img_label = tk.Label(img_frame, bg="#F0F0F0")
+        self.img_label.pack(fill=tk.BOTH, expand=True)
+
+        # Text frame
+        text_frame = tk.LabelFrame(middle_frame, text="Extracted Text")
+        self.text_widget = tk.Text(text_frame, wrap=tk.WORD)
+        text_scroll = tk.Scrollbar(text_frame, command=self.text_widget.yview)
+        self.text_widget.configure(yscrollcommand=text_scroll.set)
+
+        self.text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        text_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        middle_frame.add(img_frame)
+        middle_frame.add(text_frame)
+
+        # Status bar
+        self.status_var = tk.StringVar(value="Ready")
+        status_bar = tk.Label(self.root, textvariable=self.status_var, bd=1, relief=tk.SUNKEN, anchor=tk.W)
+        status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+
+    # ------------ Core functionality ------------
+    def select_image(self):
+        path = filedialog.askopenfilename(
+            filetypes=[("Image Files", "*.png *.jpg *.jpeg *.bmp *.tiff *.webp")]
+        )
+        if not path:
+            return
+
+        try:
+            img = Image.open(path)
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not open image:\n{e}")
+            return
+
+        self.current_image_path = path
+        self.image = img
+        self._display_image(img)
+        self.text_widget.delete("1.0", tk.END)
+        self.status_var.set(f"Loaded: {os.path.basename(path)}")
+
+    def _display_image(self, img: Image.Image):
+        # Resize to fit label while keeping aspect ratio
+        max_w, max_h = 330, 360
+        img_copy = img.copy()
+        img_copy.thumbnail((max_w, max_h))
+        self.image_tk = ImageTk.PhotoImage(img_copy)
+        self.img_label.config(image=self.image_tk)
+        self.img_label.image = self.image_tk
+
+    def run_ocr(self):
+        if self.image is None:
+            messagebox.showinfo("No Image", "Please select an image first.")
+            return
+
+        self.status_var.set("Running OCR...")
+        self.root.update_idletasks()
+
+        # Custom config for better accuracy
+        lang = self.lang_var.get()
+        psm = self.psm_var.get()
+        oem = self.oem_var.get()
+        custom_config = f"--oem {oem} --psm {psm}"
+
+        try:
+            text = pytesseract.image_to_string(self.image, lang=lang, config=custom_config)
+            self.text_widget.delete("1.0", tk.END)
+            self.text_widget.insert(tk.END, text if text.strip() else "[No text detected]")
+            self.status_var.set("OCR completed")
+        except pytesseract.TesseractNotFoundError:
+            messagebox.showerror(
+                "Tesseract Not Found",
+                "Tesseract-OCR is not installed or path is not configured.\n"
+                "Please install Tesseract and set pytesseract.pytesseract.tesseract_cmd."
+            )
+            self.status_var.set("Error: Tesseract not found")
+        except Exception as e:
+            messagebox.showerror("OCR Failed", f"Text could not be extracted.\n\n{e}")
+            self.status_var.set("OCR failed")
+
+    def clear_text(self):
+        self.text_widget.delete("1.0", tk.END)
+        self.status_var.set("Text cleared")
+
+    def copy_text(self):
+        text = self.text_widget.get("1.0", tk.END).strip()
+        if not text:
+            messagebox.showinfo("Copy", "No text to copy.")
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        self.status_var.set("Text copied to clipboard")
+
+    def save_text(self):
+        text = self.text_widget.get("1.0", tk.END).strip()
+        if not text:
+            messagebox.showinfo("Save", "No text to save.")
+            return
+
+        path = filedialog.asksaveasfilename(
+            defaultextension=".txt",
+            filetypes=[("Text Files", "*.txt")]
+        )
+        if not path:
+            return
+
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+            self.status_var.set(f"Text saved to {os.path.basename(path)}")
+        except Exception as e:
+            messagebox.showerror("Save Failed", f"Could not save file:\n{e}")
+            self.status_var.set("Save failed")
+
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = OCRApp(root)
+    root.mainloop()
